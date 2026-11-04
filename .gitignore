@@ -119,3 +119,6 @@ docs/research/**/*_settings.json
 docs/research/**/*_tearsheet_metrics.json
 docs/research/**/*_indicators.json
 artifacts/agent_evals/
+
+# 카카오 알림 토큰 (비밀값)
+kakao_token.json

@@ -1,3 +1,4 @@
 recursive-include lumibot/resources *
 prune lumibot/resources/__pycache__
 global-exclude *.py[cod]
+include lumibot/components/notifications/KAKAO_SETUP.md
