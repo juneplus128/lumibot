@@ -1,3 +1,4 @@
+
 """
 Korea Investment & Securities data source for LumiBot.
 
@@ -577,6 +578,7 @@ class KoreaInvestmentData(DataSource):
         )
 
         output = response.get("output")
+
         if not isinstance(output, dict):
             raise KoreaInvestmentAPIError(
                 "Current-price response does not "
@@ -697,4 +699,3 @@ class KoreaInvestmentData(DataSource):
             "Option chains are outside the initial "
             "domestic-stock data scope."
         )
-
