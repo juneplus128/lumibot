@@ -316,3 +316,102 @@ def test_strategy_with_kis_uses_krw_by_default(tmp_path):
     broker = _broker(tmp_path, fake)
     strategy = _Dummy(broker=broker)
     assert strategy.quote_asset.symbol == "KRW"
+
+
+# ---------------------------------------------------------------- 6. 호가 (get_quote)
+ASKING = {**OK,
+          # 2026-11-16 모의서버 실제 응답의 항목 이름 그대로 (output2 에는 누적 거래량이 없다)
+          "output1": {"askp1": "198600", "bidp1": "198500", "askp_rsqn1": "1354", "bidp_rsqn1": "9932",
+                      "aspr_acpt_hour": "105810"},
+          "output2": {"stck_prpr": "198500", "stck_sdpr": "200000", "stck_shrn_iscd": "005930"}}
+
+
+def test_kis_data_get_quote(tmp_path):
+    from lumibot.data_sources.kis_data import KisData
+    fake = _FakeKis()
+    fake.reply("/inquire-asking-price-exp-ccn", _Res(ASKING))
+    q = KisData(client=_client(tmp_path, fake)).get_quote("5930")
+    _, url, headers, params = fake.calls[0]
+    assert headers["tr_id"] == "FHKST01010200" and params["FID_INPUT_ISCD"] == "005930"
+    assert (q.bid, q.ask, q.bid_size, q.ask_size, q.price) == (198500.0, 198600.0, 9932.0, 1354.0, 198500.0)
+    assert q.mid_price == 198550.0
+    assert q.change == -1500.0 and q.percent_change == -0.75
+    assert q.timestamp.strftime("%H:%M:%S") == "10:58:10"
+
+
+def test_kis_data_get_quote_error_returns_none(tmp_path):
+    from lumibot.data_sources.kis_data import KisData
+    fake = _FakeKis()
+    fake.reply("/inquire-asking-price-exp-ccn", _Res({"rt_cd": "1", "msg_cd": "X", "msg1": "실패"}))
+    assert KisData(client=_client(tmp_path, fake)).get_quote("005930") is None
+
+
+# ---------------------------------------------------------------- 7. 정정 주문
+def test_modify_limit_order_gets_new_order_no_and_keeps_tracking(tmp_path, monkeypatch):
+    fake = _FakeKis()
+    fake.reply("/order-cash", _Res({**OK, "output": {"KRX_FWDG_ORD_ORGNO": "91252", "ODNO": "0000500001"}}))
+    fake.reply("/order-rvsecncl", _Res({**OK, "output": {"KRX_FWDG_ORD_ORGNO": "91252", "ODNO": "0000500009"}}))
+    fake.reply("/inquire-balance", _Res(BALANCE))
+    fake.reply("/inquire-daily-ccld", _Res({**OK, "output1": [
+        _ccld("0000500001", 1, 0, 0, rmn_qty="0"),                               # 원주문 (정정되어 잔량 0)
+        _ccld("0000500009", 1, 1, 70500, orgn_odno="0000500001", ord_unpr="70500"),  # 정정 주문 체결
+    ]}))
+    broker = _broker(tmp_path, fake)
+    events = []
+    real = broker._process_trade_event
+    monkeypatch.setattr(broker, "_process_trade_event",
+                        lambda order, event, **kw: (events.append(event), real(order, event, **kw))[1])
+    order = broker._submit_order(_stock_order(broker, qty=1, limit=70000))
+    broker.modify_order(order, limit_price=70520)            # 매수 → 호가 단위(100원)로 내림 = 70,500
+    _, _, headers, body = fake.calls[1]
+    assert headers["tr_id"] == "VTTC0013U"
+    assert body["RVSE_CNCL_DVSN_CD"] == "01" and body["ORD_UNPR"] == "70500"
+    assert body["ORGN_ODNO"] == "0000500001" and body["KRX_FWDG_ORD_ORGNO"] == "91252"
+    assert order.identifier == "0000500009" and order.previous_identifiers == ["0000500001"]
+    assert order.limit_price == 70500
+    broker.do_polling()
+    assert broker.FILLED_ORDER in events and order.is_filled()
+    assert broker.CANCELED_ORDER not in events                # 원주문 줄 때문에 취소로 오해하지 않는다
+
+
+def test_modify_refuses_market_and_partially_filled_orders(tmp_path):
+    from lumibot.brokers.broker import LumibotBrokerAPIError
+    fake = _FakeKis()
+    fake.reply("/order-cash", _Res({**OK, "output": {"KRX_FWDG_ORD_ORGNO": "91252", "ODNO": "0000600001"}}))
+    broker = _broker(tmp_path, fake)
+    market = broker._submit_order(_stock_order(broker, qty=1, limit=None))
+    with pytest.raises(LumibotBrokerAPIError):
+        broker.modify_order(market, limit_price=70000)
+    limit = broker._submit_order(_stock_order(broker, qty=10, limit=70000))
+    limit.status = "partially_filled"
+    with pytest.raises(LumibotBrokerAPIError):
+        broker.modify_order(limit, limit_price=70100)
+    assert not any(c[1].endswith("/order-rvsecncl") for c in fake.calls)   # KIS 에는 보내지 않았다
+
+
+# ---------------------------------------------------------------- 8. .env 자동 설정 (TRADING_BROKER=kis)
+def test_paper_flag_accepts_text(tmp_path):
+    fake = _FakeKis()
+    assert KisClient(paper="false", session=fake, app_key="A", app_secret="B", account_no="1").paper is False
+    assert KisClient(paper="true", session=fake, app_key="A", app_secret="B", account_no="1").paper is True
+
+
+@pytest.mark.parametrize("name", ["kis", "KIS", "koreainvestment"])
+def test_trading_broker_env_selects_kis(monkeypatch, name):
+    import lumibot.credentials as cred
+    made = {}
+
+    class _FakeBroker:
+        name = "KIS"
+        client = object()
+
+        def __init__(self, config, connect_stream=True):
+            made["config"] = config
+
+    monkeypatch.setattr(cred, "trading_broker_name", name)
+    monkeypatch.setattr(cred, "data_source_name", "kis")
+    monkeypatch.setattr(cred, "_broker_class", lambda cls_name: _FakeBroker if cls_name == "KIS" else None)
+    monkeypatch.setattr(cred, "KIS_CONFIG", {"APP_KEY": "k", "APP_SECRET": "s", "ACCOUNT_NO": "1", "IS_PAPER": True})
+    broker, data_source = cred._build_default_live_credentials()
+    assert isinstance(broker, _FakeBroker) and made["config"]["IS_PAPER"] is True
+    assert type(data_source).__name__ == "KisData" and data_source.client is _FakeBroker.client

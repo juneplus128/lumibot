@@ -3,7 +3,7 @@
 example_broker_data.py(빈 틀)를 KIS API 로 채운 파일이다. 전략에서
 self.get_last_price("005930"), self.get_historical_prices("005930", 20, "day") 를 부르면 여기로 온다.
 
-지원 범위 (1차): 현재가, 일봉. 분봉은 KIS 가 당일 것만 줘서 아직 지원하지 않는다.
+지원 범위: 현재가, 상하한가, 호가(get_quote), 일봉. 분봉은 KIS 가 당일 것만 줘서 아직 지원하지 않는다.
 백테스트에는 쓰지 않는다 (백테스트는 Yahoo·Pandas 데이터 사용).
 """
 
@@ -17,7 +17,7 @@ import pandas as pd
 from lumibot.brokers.kis_client import KisClient, KisError
 from lumibot.brokers.krx_rules import normalize_code
 from lumibot.data_sources.data_source import DataSource
-from lumibot.entities import Asset, Bars
+from lumibot.entities import Asset, Bars, Quote
 from lumibot.tools.lumibot_logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,7 +26,9 @@ KST = ZoneInfo("Asia/Seoul")
 
 PATH_PRICE = "/uapi/domestic-stock/v1/quotations/inquire-price"
 PATH_DAILY = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+PATH_ASKING = "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
 TR_PRICE = "FHKST01010100"   # 주식현재가 시세 (실전·모의 공통)
+TR_ASKING = "FHKST01010200"  # 주식현재가 호가/예상체결 (실전·모의 공통)
 TR_DAILY = "FHKST03010100"   # 기간별 시세 일/주/월/년 (한 번에 최대 100건)
 MARKET_KRX = "J"
 
@@ -63,6 +65,53 @@ class KisData(DataSource):
         except (KisError, KeyError, TypeError, ValueError) as e:
             logger.error(f"KIS 상하한가 조회 실패 ({asset}): {e}")
             return None
+
+    def get_quote(self, asset, quote=None, exchange=None) -> Quote | None:
+        """매수·매도 1호가와 잔량. 실패하면 None.
+
+        KIS 호가 API(FHKST01010200)에는 누적 거래량이 없어서 volume 은 비워 둔다.
+        등락(change)은 현재가 - 기준가(전일 종가)로 계산한다.
+        (팀원 이도연 님의 korea_investment_data.get_quote 를 참고해 KisClient 기반으로 옮김)
+        """
+        if not isinstance(asset, Asset):
+            asset = Asset(str(asset), Asset.AssetType.STOCK)
+        try:
+            res = self.client.request("GET", PATH_ASKING, TR_ASKING, {
+                "FID_COND_MRKT_DIV_CODE": MARKET_KRX,
+                "FID_INPUT_ISCD": normalize_code(asset.symbol),
+            })
+        except KisError as e:
+            logger.error(f"KIS 호가 조회 실패 ({asset}): {e}")
+            return None
+        book = res.body.get("output1") or {}
+        info = res.body.get("output2") or {}
+
+        def num(value):
+            try:
+                return float(str(value).replace(",", ""))
+            except (TypeError, ValueError):
+                return None
+
+        price, base = num(info.get("stck_prpr")), num(info.get("stck_sdpr"))
+        change = price - base if price is not None and base else None
+        stamp = None
+        hhmmss = str(book.get("aspr_acpt_hour") or "")
+        if len(hhmmss) == 6 and hhmmss.isdigit():
+            stamp = datetime.now(KST).replace(hour=int(hhmmss[:2]), minute=int(hhmmss[2:4]),
+                                              second=int(hhmmss[4:]), microsecond=0)
+        return Quote(
+            asset=asset,
+            price=price,
+            bid=num(book.get("bidp1")),
+            ask=num(book.get("askp1")),
+            bid_size=num(book.get("bidp_rsqn1")),
+            ask_size=num(book.get("askp_rsqn1")),
+            change=change,
+            percent_change=round(change / base * 100, 2) if change is not None else None,
+            timestamp=stamp,
+            quote_time=stamp,
+            raw_data=res.body,
+        )
 
     def get_historical_prices(self, asset, length, timestep="day", timeshift=None, quote=None, exchange=None,
                               include_after_hours=True):

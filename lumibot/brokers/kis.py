@@ -4,10 +4,12 @@ example_broker.py(빈 틀)의 메소드를 KIS API 로 채운 파일이다. 체�
 Tradier 처럼 몇 초마다 '일별 주문 체결 조회'를 해서 늘어난 체결 수량을 엔진에 알린다
 (do_polling). 엔진이 체결 이벤트를 받으면 on_filled_order() 와 카카오 알림이 그대로 동작한다.
 
-지원 범위 (1차): 국내 주식, 지정가·시장가, 매수·매도, 취소. 모의투자 기준으로 개발.
-지원 안 함: 정정 주문, 손절·bracket 같은 복합 주문, 공매도, 해외 주식.
+지원 범위: 국내 주식, 지정가·시장가, 매수·매도, 취소, 지정가 정정(부분 체결 전). 모의투자로 검증.
+지원 안 함: 손절·bracket 같은 복합 주문, 공매도, 해외 주식.
 
 사용 예
+    # 1) .env 에 TRADING_BROKER=kis 를 넣으면 Strategy() 가 자동으로 KIS 를 쓴다
+    # 2) 또는 코드에서 직접
     from lumibot.brokers import KIS
     broker = KIS()                      # .env 의 KIS_APP_KEY 등을 읽음 (모의투자 기본)
     strategy = MyStrategy(broker=broker)
@@ -234,7 +236,55 @@ class KIS(Broker):
         # 취소 확정은 다음 체결 조회(do_polling)에서 처리한다
 
     def _modify_order(self, order: Order, limit_price=None, stop_price=None):
-        logger.warning("KIS 어댑터는 아직 정정 주문을 지원하지 않습니다. 취소 후 다시 주문하세요.")
+        """지정가 주문의 가격 정정. KIS 는 정정하면 새 주문번호를 준다.
+
+        Schwab 어댑터처럼 order.identifier 를 새 번호로 바꾸고 예전 번호는 previous_identifiers 에 남긴다.
+        (엔진 입장에서는 같은 주문이므로 따로 이벤트를 보내지 않는다)
+        부분 체결된 주문은 정정하지 않는다: 새 주문번호의 체결 수량이 0부터 다시 세어져서 누적 체결 계산이 틀어진다.
+        """
+        if not order.identifier or not order.was_transmitted():
+            raise ValueError("주문번호가 없어 정정할 수 없습니다. 먼저 주문을 제출했는지 확인하세요.")
+        if stop_price is not None:
+            raise LumibotBrokerAPIError("KIS 어댑터는 손절가(stop_price) 정정을 지원하지 않습니다.")
+        if limit_price is None:
+            raise ValueError("정정할 지정가(limit_price)를 넣어 주세요.")
+        if order.order_type != Order.OrderType.LIMIT:
+            raise LumibotBrokerAPIError("KIS 어댑터는 지정가 주문만 정정할 수 있습니다.")
+        if not order.is_active():
+            raise LumibotBrokerAPIError(f"이미 끝난 주문은 정정할 수 없습니다 (상태: {order.status}).")
+        if order.status == Order.OrderStatus.PARTIALLY_FILLED or getattr(order, "transactions", None):
+            raise LumibotBrokerAPIError("부분 체결된 주문은 정정할 수 없습니다. 취소 후 다시 주문하세요.")
+
+        is_buy = order.side == Order.OrderSide.BUY
+        price = round_to_tick(float(limit_price), "down" if is_buy else "up")
+        params = {
+            **self.client.account_params(),
+            "KRX_FWDG_ORD_ORGNO": self._kis_orgno.get(order.identifier, ""),
+            "ORGN_ODNO": order.identifier,
+            "ORD_DVSN": ORD_LIMIT,
+            "RVSE_CNCL_DVSN_CD": "01",     # 01 = 정정
+            "ORD_QTY": "0",
+            "ORD_UNPR": str(price),
+            "QTY_ALL_ORD_YN": "Y",         # 남은 수량 전부
+            "EXCG_ID_DVSN_CD": "KRX",
+        }
+        try:
+            res = self.client.request("POST", PATH_CANCEL, TR_CANCEL, params)
+        except KisError as e:
+            raise LumibotBrokerAPIError(f"KIS 주문 정정 실패: {e}") from e
+
+        out = res.body.get("output") or {}
+        new_id = str(out.get("ODNO") or out.get("odno") or "")
+        if not new_id:
+            raise LumibotBrokerAPIError("KIS 가 정정 주문번호를 돌려주지 않았습니다.")
+        old_id = order.identifier
+        order.previous_identifiers = (getattr(order, "previous_identifiers", None) or []) + [old_id]
+        order.identifier = new_id
+        order.limit_price = price
+        self._kis_orgno[new_id] = str(out.get("KRX_FWDG_ORD_ORGNO") or self._kis_orgno.get(old_id, ""))
+        self._kis_ord_dvsn[new_id] = ORD_LIMIT
+        logger.info(f"KIS 주문 정정: {old_id} → {new_id}, 지정가 {price:,}원")
+        return order
 
     # ================================================================== 주문 조회
     def _ccld_rows(self, odno: str = "") -> list[dict]:

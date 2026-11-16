@@ -99,6 +99,8 @@ class KisClient:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ):
+        if isinstance(paper, str):   # "false" 같은 글자가 와도 올바르게 읽는다 (bool("false") 는 True 라서)
+            paper = paper.strip().lower() in ("1", "true", "yes", "on")
         self.paper = _env_flag("KIS_IS_PAPER", True) if paper is None else bool(paper)
         self.base_url = PAPER_URL if self.paper else REAL_URL
         self.app_key = (app_key or os.environ.get("KIS_APP_KEY", "")).strip()
