@@ -26,6 +26,7 @@ _NAME_TO_MODULE = {
     "ProjectXData": "projectx_data",
     "SchwabData": "schwab_data",
     "TradierData": "tradier_data",
+    "KisData": "kis_data",  # 한국투자증권 시세
     "TradovateData": "tradovate_data",
     "UnavailabeTimestep": "exceptions",
     "YahooData": "yahoo_data",
