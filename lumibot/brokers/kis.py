@@ -17,6 +17,7 @@ Tradier 처럼 몇 초마다 '일별 주문 체결 조회'를 해서 늘어난 �
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
@@ -46,6 +47,17 @@ ORD_LIMIT, ORD_MARKET = "00", "01"   # 주문구분: 지정가 / 시장가
 SIDE_SELL, SIDE_BUY = "01", "02"     # 체결 조회의 매도매수구분코드
 
 
+def _first_set(*values):
+    """None 이 아닌 첫 값 (명시한 인자 > config > 환경변수 순서)"""
+    return next((v for v in values if v is not None), None)
+
+
+def _truthy(value) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def _num(value, default=0.0) -> float:
     try:
         return float(str(value).replace(",", ""))
@@ -69,7 +81,7 @@ class KIS(Broker):
     DEFAULT_QUOTE_SYMBOL = "KRW"
 
     def __init__(self, config=None, *, client: KisClient | None = None, data_source=None, paper=None,
-                 polling_interval: float = 5.0, connect_stream: bool = True, max_workers: int = 1):
+                 allow_real=None, polling_interval: float = 5.0, connect_stream: bool = True, max_workers: int = 1):
         config = dict(config or {})
         # [연결 준비] config 가 있으면 그 값을, 없으면 .env(KIS_*) 값을 쓴다
         self.client = client or KisClient(
@@ -78,6 +90,14 @@ class KIS(Broker):
             account_no=config.get("ACCOUNT_NO"),
             paper=config.get("IS_PAPER", paper),
         )
+        # [실전 이중 잠금] 실전 서버(진짜 돈)는 KIS_IS_PAPER=false 하나만으로는 열리지 않는다.
+        # KIS_ALLOW_REAL=true 를 한 번 더 적어야 한다 (팀원 패치 kis_adapter_3 의 ALLOW_REAL 아이디어).
+        if not self.client.paper and not _truthy(_first_set(allow_real, config.get("ALLOW_REAL"),
+                                                            os.environ.get("KIS_ALLOW_REAL"))):
+            raise ValueError(
+                "KIS 실전 서버는 진짜 돈이 움직입니다. 실전으로 쓰려면 KIS_IS_PAPER=false 와 함께 "
+                "KIS_ALLOW_REAL=true 도 설정하세요. (모의투자는 KIS_IS_PAPER=true)"
+            )
         # 체결 조회 간격. 모의투자는 초당 호출 한도가 낮아서 너무 짧게 하지 않는다.
         self.polling_interval = polling_interval
         self._kis_orgno: dict[str, str] = {}     # 주문번호 → 주문 조직번호 (취소할 때 필요)
@@ -160,6 +180,11 @@ class KIS(Broker):
         return {"hourly": None, "daily": None}
 
     # ================================================================== 주문
+    def _is_etf(self, asset) -> bool:
+        """ETF·ETN 이면 호가 단위가 다르다. 시세 부품이 KisData 가 아니면(직접 넣은 경우) 주식으로 본다."""
+        checker = getattr(self.data_source, "is_etf", None)
+        return bool(checker(asset)) if callable(checker) else False
+
     def _submit_order(self, order: Order) -> Order:
         # 1) 지원하는 주문인지 확인
         problem = None
@@ -184,7 +209,8 @@ class KIS(Broker):
         is_buy = order.side == Order.OrderSide.BUY
         if order.order_type == Order.OrderType.LIMIT:
             ord_dvsn = ORD_LIMIT
-            price = round_to_tick(float(order.limit_price), "down" if is_buy else "up")
+            price = round_to_tick(float(order.limit_price), "down" if is_buy else "up",
+                                  is_etf=self._is_etf(order.asset))
         else:
             ord_dvsn, price = ORD_MARKET, 0
         params = {
@@ -256,7 +282,7 @@ class KIS(Broker):
             raise LumibotBrokerAPIError("부분 체결된 주문은 정정할 수 없습니다. 취소 후 다시 주문하세요.")
 
         is_buy = order.side == Order.OrderSide.BUY
-        price = round_to_tick(float(limit_price), "down" if is_buy else "up")
+        price = round_to_tick(float(limit_price), "down" if is_buy else "up", is_etf=self._is_etf(order.asset))
         params = {
             **self.client.account_params(),
             "KRX_FWDG_ORD_ORGNO": self._kis_orgno.get(order.identifier, ""),

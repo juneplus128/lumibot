@@ -449,6 +449,8 @@ KIS_CONFIG = {
     "APP_SECRET": os.environ.get("KIS_APP_SECRET"),
     "ACCOUNT_NO": os.environ.get("KIS_ACCOUNT_NO"),
     "IS_PAPER": os.environ.get("KIS_IS_PAPER", "true").strip().lower() in ("1", "true", "yes", "on"),
+    # Live (real-money) trading needs a second, explicit opt-in: KIS_IS_PAPER=false AND KIS_ALLOW_REAL=true
+    "ALLOW_REAL": os.environ.get("KIS_ALLOW_REAL", "false").strip().lower() in ("1", "true", "yes", "on"),
 }
 
 # Tradier test configuration for unit tests

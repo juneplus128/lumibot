@@ -46,6 +46,23 @@ class KisData(DataSource):
     def __init__(self, client: KisClient | None = None, **kwargs):
         super().__init__(**kwargs)
         self.client = client or KisClient()
+        self._etf_cache: dict[str, bool] = {}
+
+    def is_etf(self, asset) -> bool:
+        """ETF·ETN 이면 True (호가 단위가 주식과 다르다). 종목마다 한 번만 조회해서 기억한다.
+
+        KIS 현재가 응답의 대표시장(rprs_mrkt_kor_name)이 "ETF"/"ETN" 이면 ETF 로 본다.
+        조회에 실패하면 False(주식 표). 주식 호가 단위는 ETF 단위(1·5원)의 배수라 주문은 항상 유효하다.
+        """
+        code = normalize_code(asset.symbol if isinstance(asset, Asset) else asset)
+        if code not in self._etf_cache:
+            try:
+                market = str(self._price_row(code).get("rprs_mrkt_kor_name") or "").upper()
+            except KisError as e:
+                logger.warning(f"KIS ETF 여부 조회 실패 ({code}), 주식 호가 단위로 처리: {e}")
+                return False
+            self._etf_cache[code] = market in ("ETF", "ETN")
+        return self._etf_cache[code]
 
     def _price_row(self, asset) -> dict:
         symbol = asset.symbol if isinstance(asset, Asset) else asset

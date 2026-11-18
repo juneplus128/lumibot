@@ -156,6 +156,9 @@ def test_normalize_code_and_qty():
 # ---------------------------------------------------------------- 3. 브로커 (Lumibot 연결)
 def _broker(tmp_path, fake):
     from lumibot.brokers.kis import KIS
+    # 지정가 주문 때 ETF 여부를 현재가 API 로 한 번 묻는다 → 기본은 일반 주식(KOSPI200) 응답
+    if not any(k.endswith("/inquire-price") for k in fake.routes):
+        fake.reply("/inquire-price", _Res({**OK, "output": {"rprs_mrkt_kor_name": "KOSPI200", "stck_prpr": "70000"}}))
     return KIS(client=_client(tmp_path, fake), connect_stream=False)
 
 
@@ -191,7 +194,7 @@ def test_submit_limit_buy_rounds_price_and_remembers_order_no(tmp_path):
                                                      "ORD_TMD": "121052"}}))
     broker = _broker(tmp_path, fake)
     order = broker._submit_order(_stock_order(broker))
-    _, url, headers, body = fake.calls[0]
+    _, url, headers, body = next(c for c in fake.calls if c[1].endswith("/order-cash"))   # ETF 확인 요청 다음
     assert headers["tr_id"] == "VTTC0012U"
     assert body["PDNO"] == "005930" and body["ORD_DVSN"] == "00"
     assert body["ORD_QTY"] == "10" and body["ORD_UNPR"] == "70000"      # 70,050 → 호가 단위 내림
@@ -363,7 +366,7 @@ def test_modify_limit_order_gets_new_order_no_and_keeps_tracking(tmp_path, monke
                         lambda order, event, **kw: (events.append(event), real(order, event, **kw))[1])
     order = broker._submit_order(_stock_order(broker, qty=1, limit=70000))
     broker.modify_order(order, limit_price=70520)            # 매수 → 호가 단위(100원)로 내림 = 70,500
-    _, _, headers, body = fake.calls[1]
+    _, _, headers, body = next(c for c in fake.calls if c[1].endswith("/order-rvsecncl"))
     assert headers["tr_id"] == "VTTC0013U"
     assert body["RVSE_CNCL_DVSN_CD"] == "01" and body["ORD_UNPR"] == "70500"
     assert body["ORGN_ODNO"] == "0000500001" and body["KRX_FWDG_ORD_ORGNO"] == "91252"
@@ -495,3 +498,57 @@ def test_unsupported_timestep_returns_none(tmp_path):
     fake = _FakeKis()
     assert KisData(client=_client(tmp_path, fake)).get_historical_prices("005930", 5, "hour") is None
     assert fake.calls == []
+
+
+# ---------------------------------------------------------------- 11. 실전 이중 잠금
+def test_real_server_needs_second_opt_in(tmp_path, monkeypatch):
+    from lumibot.brokers.kis import KIS
+    monkeypatch.delenv("KIS_ALLOW_REAL", raising=False)
+    real = _client(tmp_path, _FakeKis(), paper=False)
+    with pytest.raises(ValueError, match="KIS_ALLOW_REAL"):
+        KIS(client=real, connect_stream=False)                       # KIS_IS_PAPER=false 만으로는 안 열림
+    assert KIS(client=real, connect_stream=False, allow_real=True).client.paper is False
+    assert KIS(config={"ALLOW_REAL": True}, client=real, connect_stream=False).client.paper is False
+    monkeypatch.setenv("KIS_ALLOW_REAL", "true")
+    assert KIS(client=real, connect_stream=False).client.paper is False
+    monkeypatch.setenv("KIS_ALLOW_REAL", "false")
+    with pytest.raises(ValueError):
+        KIS(client=real, connect_stream=False)
+
+
+def test_paper_never_needs_allow_real(tmp_path, monkeypatch):
+    from lumibot.brokers.kis import KIS
+    monkeypatch.delenv("KIS_ALLOW_REAL", raising=False)
+    assert KIS(client=_client(tmp_path, _FakeKis()), connect_stream=False).client.paper is True
+
+
+# ---------------------------------------------------------------- 12. ETF 호가 단위
+@pytest.mark.parametrize("price,stock,etf", [(1_995, 1, 1), (2_000, 5, 5), (24_305, 50, 5), (79_400, 100, 5),
+                                             (250_000, 500, 5)])
+def test_etf_tick_table(price, stock, etf):
+    assert tick_size(price) == stock and tick_size(price, is_etf=True) == etf
+
+
+def test_etf_round_to_tick():
+    assert round_to_tick(79_403, "down", is_etf=True) == 79_400 and round_to_tick(79_403, "up", is_etf=True) == 79_405
+    assert round_to_tick(1_999.5, "up", is_etf=True) == 2_000
+    assert round_to_tick(79_403, "down") == 79_400 and round_to_tick(79_403, "up") == 79_500   # 주식 표는 100원
+
+
+def test_limit_order_on_etf_uses_etf_tick_and_checks_once(tmp_path):
+    fake = _FakeKis()
+    # 2026-11-18 모의서버 실제 응답: KODEX 200 rprs_mrkt_kor_name="ETF", aspr_unit=5
+    fake.reply("/inquire-price", _Res({**OK, "output": {"rprs_mrkt_kor_name": "ETF", "stck_prpr": "79400"}}))
+    fake.reply("/order-cash", _Res({**OK, "output": {"KRX_FWDG_ORD_ORGNO": "91252", "ODNO": "0000700001"}}))
+    broker = _broker(tmp_path, fake)
+    from lumibot.entities import Asset, Order
+    for _ in range(2):
+        broker._submit_order(Order(strategy="S", asset=Asset("069500", Asset.AssetType.STOCK), quantity=1,
+                                   side="buy", limit_price=79_403, order_type=Order.OrderType.LIMIT))
+    orders = [c for c in fake.calls if c[1].endswith("/order-cash")]
+    assert [o[3]["ORD_UNPR"] for o in orders] == ["79400", "79400"]
+    sell = Order(strategy="S", asset=Asset("069500", Asset.AssetType.STOCK), quantity=1, side="sell",
+                 limit_price=79_403, order_type=Order.OrderType.LIMIT)
+    broker._submit_order(sell)
+    assert [c for c in fake.calls if c[1].endswith("/order-cash")][-1][3]["ORD_UNPR"] == "79405"   # ETF 5원 올림
+    assert len([c for c in fake.calls if c[1].endswith("/inquire-price")]) == 1                   # ETF 여부는 한 번만
