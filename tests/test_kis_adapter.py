@@ -415,3 +415,83 @@ def test_trading_broker_env_selects_kis(monkeypatch, name):
     broker, data_source = cred._build_default_live_credentials()
     assert isinstance(broker, _FakeBroker) and made["config"]["IS_PAPER"] is True
     assert type(data_source).__name__ == "KisData" and data_source.client is _FakeBroker.client
+
+
+# ---------------------------------------------------------------- 9. 한국거래소 장 시간 (폐장 15:30)
+def test_krx_market_hours_close_is_1530_not_lunch_break(tmp_path):
+    # 2026-11-18 팀원 김지용 님이 발견: XKRX 달력 열 순서가 market_open, break_start, break_end, market_close 라서
+    # 본체가 1번째 열(break_start=12:00)을 폐장으로 읽던 문제. 오후에 전략이 '장 마감'으로 착각할 수 있었다.
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    kst = ZoneInfo("Asia/Seoul")
+    broker = _broker(tmp_path, _FakeKis())
+    day = dt.date(2026, 11, 19)
+    assert broker.market_hours(close=False, date=day).astimezone(kst).strftime("%H:%M") == "09:00"
+    assert broker.market_hours(close=True, date=day).astimezone(kst).strftime("%H:%M") == "15:30"
+
+
+# ---------------------------------------------------------------- 10. 분봉 (오늘 정규장만)
+def _minute(hhmm, price, vol, date="20261119"):
+    return {"stck_bsop_date": date, "stck_cntg_hour": f"{hhmm}00", "stck_prpr": str(price),
+            "stck_oprc": str(price - 100), "stck_hgpr": str(price + 100), "stck_lwpr": str(price - 200),
+            "cntg_vol": str(vol)}
+
+
+def _fixed_now(monkeypatch, hh, mm):
+    import datetime as real
+    import lumibot.data_sources.kis_data as mod
+
+    class _Fixed(real.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real.datetime(2026, 11, 19, hh, mm, tzinfo=tz)
+
+    monkeypatch.setattr(mod, "datetime", _Fixed)
+
+
+def test_minute_bars_after_close_start_at_1530_and_drop_filled_rows(tmp_path, monkeypatch):
+    from lumibot.data_sources.kis_data import KisData
+    _fixed_now(monkeypatch, 20, 20)                        # 장 마감 뒤 (저녁 8시 20분)
+    fake = _FakeKis()
+    fake.reply("/inquire-time-itemchartprice", _Res({**OK, "output2": [
+        _minute("1530", 70500, 900), _minute("1529", 70400, 0),   # 15:29 는 거래 없음 → KIS 가 채운 줄
+        _minute("1528", 70300, 120), _minute("1527", 70200, 80),
+    ]}))
+    bars = KisData(client=_client(tmp_path, fake)).get_historical_prices("005930", 10, "minute")
+    _, _, headers, params = fake.calls[0]
+    assert headers["tr_id"] == "FHKST03010200"
+    assert params["FID_INPUT_HOUR_1"] == "153000"          # 지금 시각(20:20)이 아니라 15:30 부터
+    df = bars.df
+    assert list(df["close"]) == [70200.0, 70300.0, 70500.0]  # 거래량 0 줄 제거, 시간 순
+    assert df.index[-1].tz_convert("Asia/Seoul").strftime("%H:%M") == "15:30"
+
+
+def test_minute_bars_page_backwards_and_build_5_minute_bars(tmp_path, monkeypatch):
+    from lumibot.data_sources.kis_data import KisData
+    _fixed_now(monkeypatch, 9, 10)
+    fake = _FakeKis()
+    page1 = [_minute(f"09{m:02d}", 70000 + m * 10, 10) for m in range(10, 4, -1)]   # 09:10 ~ 09:05
+    page2 = [_minute(f"09{m:02d}", 70000 + m * 10, 10) for m in range(4, -1, -1)]   # 09:04 ~ 09:00
+    fake.reply("/inquire-time-itemchartprice", _Res({**OK, "output2": page1}), _Res({**OK, "output2": page2}))
+    bars = KisData(client=_client(tmp_path, fake)).get_historical_prices("005930", 2, "5 minutes")
+    assert fake.calls[1][3]["FID_INPUT_HOUR_1"] == "090400"   # 두 번째 요청은 받은 것 중 가장 이른 시각 - 1분
+    df = bars.df
+    kst_times = [t.tz_convert("Asia/Seoul").strftime("%H:%M") for t in df.index]
+    assert kst_times == ["09:05", "09:10"]                     # 마지막 2개 (09:00, 09:05, 09:10 중)
+    assert df.iloc[0]["open"] == 70050 - 100 and df.iloc[0]["close"] == 70090   # 09:05~09:09 묶음
+    assert df.iloc[0]["volume"] == 50
+
+
+def test_minute_bars_before_open_returns_none_without_calling_kis(tmp_path, monkeypatch):
+    from lumibot.data_sources.kis_data import KisData
+    _fixed_now(monkeypatch, 8, 30)
+    fake = _FakeKis()
+    assert KisData(client=_client(tmp_path, fake)).get_historical_prices("005930", 5, "minute") is None
+    assert fake.calls == []
+
+
+def test_unsupported_timestep_returns_none(tmp_path):
+    from lumibot.data_sources.kis_data import KisData
+    fake = _FakeKis()
+    assert KisData(client=_client(tmp_path, fake)).get_historical_prices("005930", 5, "hour") is None
+    assert fake.calls == []
