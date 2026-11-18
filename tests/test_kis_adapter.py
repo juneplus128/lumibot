@@ -552,3 +552,57 @@ def test_limit_order_on_etf_uses_etf_tick_and_checks_once(tmp_path):
     broker._submit_order(sell)
     assert [c for c in fake.calls if c[1].endswith("/order-cash")][-1][3]["ORD_UNPR"] == "79405"   # ETF 5원 올림
     assert len([c for c in fake.calls if c[1].endswith("/inquire-price")]) == 1                   # ETF 여부는 한 번만
+
+
+# ---------------------------------------------------------------- 13. KIS 체결 → 카카오 알림 (feature/kakao-notify 머지 후)
+def test_kis_fill_reaches_kakao_alert_in_won(tmp_path, monkeypatch):
+    """KIS 체결 조회(do_polling) → 엔진 체결 이벤트 → on_filled_order → 카카오 알림 문구까지 한 번에.
+    실제 카톡은 보내지 않는다(provider 를 가짜로 바꿈). 금액이 원화로 나와야 한다."""
+    from lumibot.components.notifications.base import NotificationResult
+    from lumibot.components.notifications.kakao import KakaoTradeAlerts
+    from lumibot.strategies import Strategy
+
+    sent = []
+
+    class _FakeProvider:
+        rest_api_key, client_secret = "k", "s"
+
+        def is_configured(self):
+            return True
+
+        def notify(self, *, title, message, **kw):
+            sent.append((title, message))
+            return NotificationResult(ok=True, provider="kakao")
+
+    filled = []
+
+    class _Strat(Strategy):
+        def on_trading_iteration(self):
+            pass
+
+        def on_filled_order(self, position, order, price, quantity, multiplier):
+            filled.append((order.identifier, price, quantity))
+
+    fake = _FakeKis()
+    fake.reply("/inquire-balance", _Res(BALANCE))
+    fake.reply("/order-cash", _Res({**OK, "output": {"KRX_FWDG_ORD_ORGNO": "91252", "ODNO": "0000800001"}}))
+    fake.reply("/inquire-daily-ccld", _Res({**OK, "output1": [_ccld("0000800001", 2, 2, 70500)]}))
+    broker = _broker(tmp_path, fake)
+    strategy = _Strat(broker=broker, name="KisKakaoTest")
+    executor = strategy._executor
+    executor._kakao_alerts_loaded = True
+    executor._kakao_alerts = KakaoTradeAlerts(strategy, provider=_FakeProvider())
+    broker._add_subscriber(executor)
+
+    from lumibot.entities import Asset, Order
+    order = Order(strategy="KisKakaoTest", asset=Asset("005930", Asset.AssetType.STOCK), quantity=2, side="buy",
+                  limit_price=70500, order_type=Order.OrderType.LIMIT)
+    broker._submit_order(order)
+    broker.do_polling()
+    executor.process_queue(skip_first_iteration_events=False)
+
+    assert filled == [("0000800001", 70500.0, 2.0)]
+    assert len(sent) == 1
+    title, message = sent[0]
+    assert "005930" in title and "매수" in title
+    assert "70,500원" in message and "$" not in message
