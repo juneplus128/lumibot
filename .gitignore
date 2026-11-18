@@ -123,5 +123,5 @@ artifacts/agent_evals/
 # KIS 토큰 (비밀값)
 kis_token*.json
 
-# 카카오 알림 토큰 (비밀값, 카카오 브랜치와 같은 줄)
+# 카카오 알림 토큰 (비밀값)
 kakao_token.json

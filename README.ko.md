@@ -18,6 +18,19 @@ LumiBot은 트레이딩 봇을 만드는 무료 오픈소스 Python 프레임워
 - **여러 자산군 지원:** [지원 브로커](https://lumibot.lumiwealth.com/brokers.all.html)에 따라 주식, 옵션, 선물, 외환, 암호화폐 및 예측 시장을 다룹니다.
 - **의사결정이 브로커에게 전달됩니다.** 주문, 체결 및 의사결정 기록을 확인하세요. [실행 방식](https://lumibot.lumiwealth.com/execution_gap.html).
 
+## 카카오톡 매매 알림
+
+주문 체결·부분 체결·취소와 장 마감 요약을 내 카카오톡 "나와의 채팅"으로 받을 수 있습니다.
+전략 코드는 고칠 필요 없이 설정만 켜면 됩니다.
+
+```bash
+lumibot kakao guide   # 설정 안내 보기 (카카오 콘솔 설정, .env 키)
+lumibot kakao login   # 브라우저에서 동의만 누르면 토큰 발급·저장·테스트까지 자동
+```
+
+그다음 `.env`에 `KAKAO_TRADE_ALERTS=true`를 넣고 전략을 실행하세요.
+자세한 내용: [docs/KAKAO_NOTIFICATIONS.md](docs/KAKAO_NOTIFICATIONS.md)
+
 ## AI 어시스턴트 연결
 
 **BotSpot MCP로 더 빠르게 구축**

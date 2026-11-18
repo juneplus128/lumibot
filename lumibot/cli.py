@@ -671,6 +671,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  lumibot backtest my-bot --days 90     backtest it\n"
             "  lumibot run my-bot --paper            trade it on a paper account\n"
             "  lumibot connect botspot               optional: link BotSpot research for agents\n"
+            "  lumibot kakao login                   optional: KakaoTalk trade alerts (guide | login | test)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -722,7 +723,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_connect.set_defaults(func=cmd_connect)
 
+    # [카카오 명령] lumibot kakao guide | login | test
+    p_kakao = sub.add_parser("kakao", help="Set up KakaoTalk trade alerts (guide | login | test)")
+    p_kakao.add_argument("action", choices=["guide", "login", "test"], help="guide: setup steps, login: get tokens, test: send a test message")
+    p_kakao.add_argument("--manual", action="store_true", help="Paste the redirected URL instead of using a local callback server")
+    p_kakao.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically")
+    p_kakao.add_argument("--timeout", type=float, default=180, help="Seconds to wait for the Kakao login (default 180)")
+    p_kakao.set_defaults(func=cmd_kakao)
+
     return parser
+
+
+# lumibot kakao ... 를 실행하면 kakao_setup.run 으로 넘긴다.
+def cmd_kakao(args) -> int:
+    from lumibot.components.notifications.kakao_setup import run
+
+    return run(args.action, manual=args.manual, open_browser=not args.no_browser, timeout=args.timeout)
 
 
 def main(argv=None) -> int:

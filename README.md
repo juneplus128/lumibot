@@ -26,6 +26,18 @@ Read this in [中文](README.zh-CN.md) · [Español](README.es.md) · [Français
 - **Multiple asset classes:** stocks, options, futures, forex, crypto and prediction markets through [supported brokers](https://lumibot.lumiwealth.com/brokers.all.html).
 - **The decision reaches a broker.** Inspect the orders, fills and decision records. [How execution works](https://lumibot.lumiwealth.com/execution_gap.html).
 
+## KakaoTalk trade alerts (카카오톡 매매 알림)
+
+Get fills, partial fills, cancels and an end-of-day summary in your own KakaoTalk chat.
+No strategy code changes are needed.
+
+```bash
+lumibot kakao guide   # setup steps (Kakao console, .env keys)
+lumibot kakao login   # click "agree" in the browser; tokens and a test message are handled for you
+```
+
+Then set `KAKAO_TRADE_ALERTS=true` in `.env`. Details: [docs/KAKAO_NOTIFICATIONS.md](docs/KAKAO_NOTIFICATIONS.md)
+
 ## Connect your AI assistant
 
 **Build faster with BotSpot MCP.** Claude, ChatGPT, Codex, Cursor, VS Code or
