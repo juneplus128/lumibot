@@ -47,6 +47,10 @@ ORD_LIMIT, ORD_MARKET = "00", "01"   # 주문구분: 지정가 / 시장가
 SIDE_SELL, SIDE_BUY = "01", "02"     # 체결 조회의 매도매수구분코드
 
 
+def _kst_today() -> str:
+    return datetime.now(KST).strftime("%Y%m%d")
+
+
 def _first_set(*values):
     """None 이 아닌 첫 값 (명시한 인자 > config > 환경변수 순서)"""
     return next((v for v in values if v is not None), None)
@@ -102,6 +106,8 @@ class KIS(Broker):
         self.polling_interval = polling_interval
         self._kis_orgno: dict[str, str] = {}     # 주문번호 → 주문 조직번호 (취소할 때 필요)
         self._kis_ord_dvsn: dict[str, str] = {}  # 주문번호 → 지정가/시장가 구분
+        self._kis_order_day: dict[str, str] = {}  # 주문번호 → 주문일(YYYYMMDD). 국내 주식 주문은 당일만 유효
+        self._kis_expired: set[int] = set()        # 만료 알림을 이미 보낸 주문 (두 번 보내지 않게)
         self._poll_count = 0
 
         if data_source is None:
@@ -237,6 +243,7 @@ class KIS(Broker):
         order.identifier = str(out.get("ODNO", ""))
         self._kis_orgno[order.identifier] = str(out.get("KRX_FWDG_ORD_ORGNO", ""))
         self._kis_ord_dvsn[order.identifier] = ord_dvsn
+        self._kis_order_day[order.identifier] = _kst_today()
         order.status = Order.OrderStatus.SUBMITTED
         order.update_raw(out)
         self._unprocessed_orders.append(order)
@@ -312,6 +319,7 @@ class KIS(Broker):
         order.limit_price = price
         self._kis_orgno[new_id] = str(out.get("KRX_FWDG_ORD_ORGNO") or self._kis_orgno.get(old_id, ""))
         self._kis_ord_dvsn[new_id] = ORD_LIMIT
+        self._kis_order_day[new_id] = _kst_today()
         logger.info(f"KIS 주문 정정: {old_id} → {new_id}, 지정가 {price:,}원")
         return order
 
@@ -374,6 +382,8 @@ class KIS(Broker):
         )
         order.filled_quantity = filled
         order.broker_status = order.status
+        if order.identifier:   # 프로그램을 다시 켜서 KIS 에서 불러온 주문도 주문일을 기억한다
+            self._kis_order_day.setdefault(order.identifier, str(response.get("ord_dt") or _kst_today()))
         return order
 
     # ================================================================== 체결 확인 (주기 조회)
@@ -391,7 +401,8 @@ class KIS(Broker):
             logger.warning(f"KIS 체결 조회 실패 (다음 주기에 다시 시도): {e}")
             return
 
-        tracked = {o.identifier: o for o in self.get_tracked_orders() if o.identifier}
+        self._expire_old_orders()
+        tracked = {o.identifier: o for o in self.get_tracked_orders() if o.identifier and o.is_active()}
         # 취소는 원주문 줄에 표시되거나, 원주문번호(orgn_odno)를 가리키는 취소 줄로 올 수 있다
         canceled_by_row = {str(r.get("orgn_odno")) for r in rows
                            if str(r.get("cncl_yn", "")).upper() == "Y" and r.get("orgn_odno")}
@@ -404,6 +415,22 @@ class KIS(Broker):
             if not self._kis_orgno.get(odno) and row.get("ord_gno_brno"):
                 self._kis_orgno[odno] = str(row["ord_gno_brno"])
             self._apply_row(order, row, canceled=odno in canceled_by_row)
+
+    def _expire_old_orders(self) -> None:
+        """주문일이 오늘보다 이전인데 아직 대기 중인 주문을 만료(취소)로 처리한다.
+
+        국내 주식 일반 주문은 당일만 유효해서 KIS 가 장 마감 후 자동으로 없앤다. 그런데 체결 조회는 '오늘' 목록만
+        보므로, 전략을 다음 날까지 켜 두면 어제 주문이 영원히 '대기'로 남는다. 또 KIS 주문번호는 하루 단위로만
+        고유해서 어제 번호가 오늘 다른 주문 번호와 같을 수 있다 → 오늘 줄과 맞춰 보기 '전에' 먼저 정리한다.
+        (Lumibot 의 EXPIRED 이벤트는 옵션 전용이라 주식은 취소 이벤트로 알린다. 김지용 님 어댑터 처리 참고)
+        """
+        today = _kst_today()
+        for order in self.get_tracked_orders():
+            day = self._kis_order_day.get(order.identifier or "")
+            if day and day < today and order.is_active() and id(order) not in self._kis_expired:
+                self._kis_expired.add(id(order))
+                logger.info(f"KIS 주문 {order.identifier}({day}) 은 당일 주문이라 만료되었습니다 → 취소로 처리")
+                self._dispatch(self.CANCELED_ORDER, order=order)
 
     def _apply_row(self, order: Order, row: dict, *, canceled: bool = False) -> None:
         if order.is_filled():

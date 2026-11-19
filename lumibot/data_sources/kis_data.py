@@ -72,22 +72,39 @@ class KisData(DataSource):
         })
         return res.body.get("output") or {}
 
+    @staticmethod
+    def _warn_unknown(asset) -> None:
+        logger.warning(f"KIS 에 {asset} 시세가 없습니다 (가격 0). 종목코드를 확인하세요 "
+                       "(6자리 숫자, ETN 은 앞에 Q: 예 Q520057).")
+
     def get_last_price(self, asset, quote=None, exchange=None):
-        """현재가 (원). 실패하면 None."""
+        """현재가 (원). 실패하거나 KIS 에 없는 종목이면 None.
+
+        KIS 는 없는 종목코드에도 에러 대신 가격 0 을 돌려준다 (2026-11-19 확인: "520057" → stck_prpr 0).
+        0 을 그대로 넘기면 전략이 진짜 가격으로 믿으므로 None 으로 바꾼다 (Lumibot RULE #1).
+        """
         try:
-            return float(self._price_row(asset).get("stck_prpr"))
+            price = float(self._price_row(asset).get("stck_prpr"))
         except (KisError, TypeError, ValueError) as e:
             logger.error(f"KIS 현재가 조회 실패 ({asset}): {e}")
             return None
+        if price <= 0:
+            self._warn_unknown(asset)
+            return None
+        return price
 
     def get_price_limits(self, asset) -> tuple[float, float, int] | None:
-        """(하한가, 상한가, 호가 단위). KIS 가 직접 알려주는 값이라 krx_rules 검증에도 쓴다."""
+        """(하한가, 상한가, 호가 단위). KIS 가 직접 알려주는 값이라 krx_rules 검증에도 쓴다. 없는 종목이면 None."""
         try:
             row = self._price_row(asset)
-            return float(row["stck_llam"]), float(row["stck_mxpr"]), int(float(row["aspr_unit"]))
+            low, high, unit = float(row["stck_llam"]), float(row["stck_mxpr"]), int(float(row["aspr_unit"]))
         except (KisError, KeyError, TypeError, ValueError) as e:
             logger.error(f"KIS 상하한가 조회 실패 ({asset}): {e}")
             return None
+        if low <= 0 or high <= 0 or unit <= 0:
+            self._warn_unknown(asset)
+            return None
+        return low, high, unit
 
     def get_quote(self, asset, quote=None, exchange=None) -> Quote | None:
         """매수·매도 1호가와 잔량. 실패하면 None.
@@ -116,6 +133,9 @@ class KisData(DataSource):
                 return None
 
         price, base = num(info.get("stck_prpr")), num(info.get("stck_sdpr"))
+        if not price or price <= 0:          # 없는 종목코드: KIS 가 가격 0 을 준다 → 시세 없음
+            self._warn_unknown(asset)
+            return None
         change = price - base if price is not None and base else None
         stamp = None
         hhmmss = str(book.get("aspr_acpt_hour") or "")
@@ -125,10 +145,10 @@ class KisData(DataSource):
         return Quote(
             asset=asset,
             price=price,
-            bid=num(book.get("bidp1")),
-            ask=num(book.get("askp1")),
-            bid_size=num(book.get("bidp_rsqn1")),
-            ask_size=num(book.get("askp_rsqn1")),
+            bid=(num(book.get("bidp1")) or None),
+            ask=(num(book.get("askp1")) or None),
+            bid_size=(num(book.get("bidp_rsqn1")) or None),
+            ask_size=(num(book.get("askp_rsqn1")) or None),
             change=change,
             percent_change=round(change / base * 100, 2) if change is not None else None,
             timestamp=stamp,

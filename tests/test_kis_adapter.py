@@ -608,3 +608,74 @@ def test_kis_fill_reaches_kakao_alert_in_won(tmp_path, monkeypatch):
     title, message = sent[0]
     assert "005930" in title and "매수" in title
     assert "70,500원" in message and "$" not in message
+
+
+# ---------------------------------------------------------------- 14. 없는 종목코드 → 가격 0 대신 None
+UNKNOWN = {**OK, "output": {"stck_prpr": "0", "stck_llam": "0", "stck_mxpr": "0", "aspr_unit": "0",
+                            "rprs_mrkt_kor_name": "KOSPI"}}   # 2026-11-19 실제: "520057"(ETN 인데 Q 빠짐) 응답
+
+
+def test_unknown_code_returns_none_not_zero(tmp_path):
+    from lumibot.data_sources.kis_data import KisData
+    fake = _FakeKis()
+    fake.reply("/inquire-price", _Res(UNKNOWN))
+    fake.reply("/inquire-asking-price-exp-ccn", _Res({**OK, "output1": {"askp1": "0", "bidp1": "0"},
+                                                      "output2": {"stck_prpr": "0", "stck_sdpr": "0"}}))
+    d = KisData(client=_client(tmp_path, fake))
+    assert d.get_last_price("520057") is None
+    assert d.get_price_limits("520057") is None
+    assert d.get_quote("520057") is None
+
+
+def test_quote_zero_bid_becomes_none(tmp_path):
+    from lumibot.data_sources.kis_data import KisData
+    fake = _FakeKis()
+    fake.reply("/inquire-asking-price-exp-ccn", _Res({**OK, "output1": {"askp1": "70100", "bidp1": "0",
+                                                                         "askp_rsqn1": "5", "bidp_rsqn1": "0"},
+                                                      "output2": {"stck_prpr": "70100", "stck_sdpr": "70000"}}))
+    q = KisData(client=_client(tmp_path, fake)).get_quote("005930")
+    assert q.ask == 70100.0 and q.bid is None and q.bid_size is None   # 매수 호가가 비어 있음 (0 이 아님)
+
+
+# ---------------------------------------------------------------- 15. 날짜 지난 대기 주문 → 만료(취소)
+def test_yesterdays_open_order_expires_once_and_does_not_steal_todays_row(tmp_path, monkeypatch):
+    import lumibot.brokers.kis as kis_mod
+    fake = _FakeKis()
+    fake.reply("/inquire-balance", _Res(BALANCE))
+    fake.reply("/order-cash", _Res({**OK, "output": {"KRX_FWDG_ORD_ORGNO": "91252", "ODNO": "0000900001"}}))
+    # 오늘 목록에 '같은 번호'의 다른 주문(다른 사람/프로그램, 체결됨)이 있다 → 어제 주문에 붙으면 안 된다
+    fake.reply("/inquire-daily-ccld", _Res({**OK, "output1": [_ccld("0000900001", 10, 10, 71000)]}))
+    broker = _broker(tmp_path, fake)
+    events = []
+    real = broker._process_trade_event
+    monkeypatch.setattr(broker, "_process_trade_event",
+                        lambda order, event, **kw: (events.append(event), real(order, event, **kw))[1])
+
+    monkeypatch.setattr(kis_mod, "_kst_today", lambda: "20261118")      # 어제 주문
+    order = broker._submit_order(_stock_order(broker, qty=10, limit=70000))
+    assert broker._kis_order_day[order.identifier] == "20261118"
+
+    monkeypatch.setattr(kis_mod, "_kst_today", lambda: "20261119")      # 다음 날
+    broker.do_polling()
+    broker.do_polling()
+    assert events.count(broker.CANCELED_ORDER) == 1                      # 만료 → 취소 이벤트 한 번
+    assert broker.FILLED_ORDER not in events and not order.is_filled()   # 오늘 같은 번호 줄이 붙지 않음
+
+
+def test_todays_open_order_is_not_expired(tmp_path, monkeypatch):
+    import lumibot.brokers.kis as kis_mod
+    fake = _FakeKis()
+    fake.reply("/inquire-balance", _Res(BALANCE))
+    fake.reply("/order-cash", _Res({**OK, "output": {"KRX_FWDG_ORD_ORGNO": "91252", "ODNO": "0000900002"}}))
+    fake.reply("/inquire-daily-ccld", _Res({**OK, "output1": [_ccld("0000900002", 10, 0, 0)]}))
+    monkeypatch.setattr(kis_mod, "_kst_today", lambda: "20261119")
+    broker = _broker(tmp_path, fake)
+    order = broker._submit_order(_stock_order(broker, qty=10, limit=70000))
+    broker.do_polling()
+    assert order.is_active()
+
+
+def test_order_loaded_from_kis_remembers_its_order_date(tmp_path):
+    broker = _broker(tmp_path, _FakeKis())
+    parsed = broker._parse_broker_order(_ccld("0000900003", 1, 0, 0, ord_dt="20261118"), "S")
+    assert broker._kis_order_day["0000900003"] == "20261118" and parsed.identifier == "0000900003"
