@@ -2500,7 +2500,13 @@ class Broker(ABC):
 
         row = 0 if not next else 1
         th = trading_hours.iloc[row, :]
-        market_open, market_close = th.iloc[0], th.iloc[1]
+        # Read by column name: calendars with a (current or discontinued) lunch break, e.g. XKRX, put
+        # break_start/break_end between market_open and market_close, so position 1 would be the break start
+        # (KRX would "close" at 12:00 instead of 15:30).
+        if "market_open" in th.index and "market_close" in th.index:
+            market_open, market_close = th["market_open"], th["market_close"]
+        else:
+            market_open, market_close = th.iloc[0], th.iloc[1]
 
         if close:
             return market_close + timedelta(minutes=self.extended_trading_minutes)

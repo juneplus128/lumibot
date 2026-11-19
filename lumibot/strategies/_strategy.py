@@ -815,7 +815,9 @@ class _Strategy:
             raise ValueError(error_message)
 
         if quote_asset is _DEFAULT_QUOTE_ASSET:
-            quote_asset = Asset(symbol="USD", asset_type="forex")
+            # Brokers that settle in a non-USD currency (e.g. KIS -> KRW) can declare DEFAULT_QUOTE_SYMBOL.
+            default_quote = getattr(self.broker, "DEFAULT_QUOTE_SYMBOL", None) or "USD"
+            quote_asset = Asset(symbol=default_quote, asset_type="forex")
 
         self._quote_asset = quote_asset if self.broker.name != "bitunix" else Asset("USDT", Asset.AssetType.CRYPTO)
 

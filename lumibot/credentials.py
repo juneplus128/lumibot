@@ -77,6 +77,7 @@ _BROKER_CLASS_NAMES = {
     "Polymarket",
     "MetaMask",
     "Kalshi",
+    "KIS",
 }
 
 
@@ -440,6 +441,18 @@ TRADIER_CONFIG = {
     else True,
 }
 
+# KIS (Korea Investment & Securities, 한국투자증권) Configuration
+# Add KIS_APP_KEY, KIS_APP_SECRET, KIS_ACCOUNT_NO (and optionally KIS_IS_PAPER, default true) to your .env file,
+# then set TRADING_BROKER=kis. Domestic (KRX) stocks only.
+KIS_CONFIG = {
+    "APP_KEY": os.environ.get("KIS_APP_KEY"),
+    "APP_SECRET": os.environ.get("KIS_APP_SECRET"),
+    "ACCOUNT_NO": os.environ.get("KIS_ACCOUNT_NO"),
+    "IS_PAPER": os.environ.get("KIS_IS_PAPER", "true").strip().lower() in ("1", "true", "yes", "on"),
+    # Live (real-money) trading needs a second, explicit opt-in: KIS_IS_PAPER=false AND KIS_ALLOW_REAL=true
+    "ALLOW_REAL": os.environ.get("KIS_ALLOW_REAL", "false").strip().lower() in ("1", "true", "yes", "on"),
+}
+
 # Tradier test configuration for unit tests
 TRADIER_TEST_CONFIG = {
     # Add TRADIER_TEST_ACCESS_TOKEN (or TRADIER_TEST_API_KEY) and TRADIER_TEST_ACCOUNT_NUMBER to your .env file
@@ -715,6 +728,8 @@ def _build_default_live_credentials():
             broker = _broker_class("Tradovate")(TRADOVATE_CONFIG, connect_stream=connect_stream)
         elif broker_name == "schwab":
             broker = _broker_class("Schwab")(SCHWAB_CONFIG, connect_stream=connect_stream)
+        elif broker_name in ("kis", "koreainvestment"):
+            broker = _broker_class("KIS")(KIS_CONFIG, connect_stream=connect_stream)
         elif broker_name == "bitunix":
             broker = _broker_class("Bitunix")(BITUNIX_CONFIG, connect_stream=connect_stream)
         elif broker_name == "metamask":
@@ -892,6 +907,11 @@ def _build_default_live_credentials():
                 data_source = SchwabData(account_number=SCHWAB_CONFIG["SCHWAB_ACCOUNT_NUMBER"])
                 if broker and broker.name.lower() == "schwab" and hasattr(broker, "client"):
                     data_source.set_client(broker.client)
+            elif data_name in ("kis", "koreainvestment"):
+                from .data_sources import KisData
+
+                # Share the broker's client (one token, one rate-limit queue) when the broker is also KIS
+                data_source = KisData(client=broker.client) if broker is not None and broker.name == "KIS" else KisData()
             elif data_name == "metamask":
                 from .data_sources import MetaMaskData
 
@@ -1020,6 +1040,8 @@ elif not is_backtesting or is_backtesting.lower() == "false":
             broker = _broker_class("Tradovate")(TRADOVATE_CONFIG, connect_stream=connect_stream)
         elif trading_broker_name.lower() == "schwab":
             broker = _broker_class("Schwab")(SCHWAB_CONFIG, connect_stream=connect_stream)
+        elif trading_broker_name.lower() in ("kis", "koreainvestment"):
+            broker = _broker_class("KIS")(KIS_CONFIG, connect_stream=connect_stream)
         elif trading_broker_name.lower() == "bitunix":
             broker = _broker_class("Bitunix")(BITUNIX_CONFIG, connect_stream=connect_stream)
         elif trading_broker_name.lower() == "metamask":
@@ -1218,6 +1240,10 @@ elif not is_backtesting or is_backtesting.lower() == "false":
                 # If broker is also Schwab, share the client
                 if broker and broker.name.lower() == "schwab" and hasattr(broker, "client"):
                     data_source.set_client(broker.client)
+            elif data_source_name.lower() in ("kis", "koreainvestment"):
+                from .data_sources import KisData
+
+                data_source = KisData(client=broker.client) if broker is not None and broker.name == "KIS" else KisData()
             elif data_source_name.lower() == "metamask":
                 from .data_sources import MetaMaskData
 

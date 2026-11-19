@@ -12,6 +12,7 @@ _NAME_TO_MODULE = {
     "Ccxt": "ccxt",
     "ExampleBroker": "example_broker",
     "InteractiveBrokers": "interactive_brokers",
+    "KIS": "kis",  # 한국투자증권 (국내 주식)
     "InteractiveBrokersREST": "interactive_brokers_rest",
     "ProjectX": "projectx",
     "Polymarket": "polymarket",
