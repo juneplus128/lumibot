@@ -198,6 +198,7 @@ def test_submit_limit_buy_rounds_price_and_remembers_order_no(tmp_path):
     assert headers["tr_id"] == "VTTC0012U"
     assert body["PDNO"] == "005930" and body["ORD_DVSN"] == "00"
     assert body["ORD_QTY"] == "10" and body["ORD_UNPR"] == "70000"      # 70,050 → 호가 단위 내림
+    assert order.limit_price == 70000                                    # 주문 객체도 실제로 보낸 가격
     assert order.identifier == "0000117057"
     assert broker._kis_orgno["0000117057"] == "91252"
 
@@ -551,6 +552,7 @@ def test_limit_order_on_etf_uses_etf_tick_and_checks_once(tmp_path):
                  limit_price=79_403, order_type=Order.OrderType.LIMIT)
     broker._submit_order(sell)
     assert [c for c in fake.calls if c[1].endswith("/order-cash")][-1][3]["ORD_UNPR"] == "79405"   # ETF 5원 올림
+    assert sell.limit_price == 79_405                                          # 주문 객체도 같은 값
     assert len([c for c in fake.calls if c[1].endswith("/inquire-price")]) == 1                   # ETF 여부는 한 번만
 
 

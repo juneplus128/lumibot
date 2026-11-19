@@ -211,6 +211,9 @@ class KIS(Broker):
             ord_dvsn = ORD_LIMIT
             price = round_to_tick(float(order.limit_price), "down" if is_buy else "up",
                                   is_etf=self._is_etf(order.asset))
+            # 주문 객체에도 실제로 보낸 가격을 적는다 (2026-11-19 모의: 79,452 요청 → KIS 79,450 접수인데
+            # 객체에는 79,452 가 남아 전략·로그가 증권사와 다른 값을 보던 문제)
+            order.limit_price = price
         else:
             ord_dvsn, price = ORD_MARKET, 0
         params = {
