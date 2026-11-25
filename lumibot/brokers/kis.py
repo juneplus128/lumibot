@@ -109,6 +109,7 @@ class KIS(Broker):
         self._kis_order_day: dict[str, str] = {}  # 주문번호 → 주문일(YYYYMMDD). 국내 주식 주문은 당일만 유효
         self._kis_expired: set[int] = set()        # 만료 알림을 이미 보낸 주문 (두 번 보내지 않게)
         self._poll_count = 0
+        self._positions_confirmed = False        # 보유 종목 조회에 한 번이라도 성공했는지
 
         if data_source is None:
             from lumibot.data_sources.kis_data import KisData
@@ -153,11 +154,9 @@ class KIS(Broker):
         return cash, positions_value, total
 
     def _pull_positions(self, strategy) -> list[Position]:
-        try:
-            rows, _ = self._balance()
-        except KisError as e:
-            logger.error(f"KIS 보유 종목 조회 실패: {e}")
-            return []
+        """보유 종목. 조회에 실패하면 KisError (빈 목록은 '정말 0주로 확인됨'이라는 뜻이라 실패 때 주면 안 된다)."""
+        rows, _ = self._balance()
+        self._positions_confirmed = True
         # 주의: Broker 본체에 self._strategy_name(문자열) 변수가 있어서 같은 이름의 함수를 만들면 충돌한다
         name = self._strategy_name_from_input(strategy) or "Unknown"
         positions = []
@@ -173,6 +172,19 @@ class KIS(Broker):
                 avg_fill_price=_num(row.get("pchs_avg_pric")) or None,
             ))
         return positions
+
+    def sync_positions(self, strategy):
+        """보유 종목 맞추기. 조회에 실패하면 마지막으로 확인된 보유를 그대로 둔다.
+
+        실패를 빈 목록으로 다루면 엔진이 보유 주식을 모두 지워서 같은 주식을 또 살 수 있고, 예외를 그대로 올리면
+        호출 한도에 걸릴 때마다 회차가 통째로 실패한다. 한 번도 확인한 적이 없으면 유지할 값이 없으므로 예외를 올린다.
+        """
+        try:
+            super().sync_positions(strategy)
+        except KisError as e:
+            if not self._positions_confirmed:
+                raise
+            logger.warning(f"KIS 보유 종목 조회 실패, 마지막으로 확인된 보유를 유지합니다: {e}")
 
     def _pull_position(self, strategy, asset: Asset):
         code = normalize_code(asset.symbol)

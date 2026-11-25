@@ -679,3 +679,88 @@ def test_order_loaded_from_kis_remembers_its_order_date(tmp_path):
     broker = _broker(tmp_path, _FakeKis())
     parsed = broker._parse_broker_order(_ccld("0000900003", 1, 0, 0, ord_dt="20261118"), "S")
     assert broker._kis_order_day["0000900003"] == "20261118" and parsed.identifier == "0000900003"
+
+
+# ---------------------------------------------------------------- 16. 보유 조회 실패를 '0주'로 오해하지 않기
+# 2026-11-25 모의투자에서 잔고 조회가 EGW00215 로 실제 실패. 예전에는 실패 시 빈 목록을 돌려줘서
+# 엔진이 보유 주식을 모두 지웠다 ("안 갖고 있으면 산다"는 전략이 같은 주식을 또 살 수 있었다).
+LIMIT = {"rt_cd": "1", "msg_cd": "EGW00215", "msg1": "원장에서 허용 가능한 초당 거래건수를 초과하였습니다."}
+
+
+def _held(broker):
+    return [(p.asset.symbol, float(p.quantity)) for p in broker._filled_positions.get_list()]
+
+
+def _break_balance(fake, body=LIMIT):
+    fake.routes["/inquire-balance"] = [_Res(body)]
+
+
+def test_failed_position_read_keeps_last_known_holdings(tmp_path):
+    fake = _FakeKis()
+    fake.reply("/inquire-balance", _Res(BALANCE))
+    broker = _broker(tmp_path, fake)
+    broker.sync_positions(None)
+    assert _held(broker) == [("005930", 10.0)]
+    _break_balance(fake)
+    broker.sync_positions(None)                                   # 조회 실패 → 예외 없이 직전 보유 유지
+    assert _held(broker) == [("005930", 10.0)]
+
+
+def test_really_sold_position_is_still_removed(tmp_path):
+    fake = _FakeKis()
+    fake.reply("/inquire-balance", _Res(BALANCE))
+    broker = _broker(tmp_path, fake)
+    broker.sync_positions(None)
+    _break_balance(fake, {**BALANCE, "output1": []})              # 조회 성공 + 정말 0주 → 지워야 한다
+    broker.sync_positions(None)
+    assert _held(broker) == []
+
+
+def test_first_position_read_failure_is_not_reported_as_empty(tmp_path):
+    fake = _FakeKis()
+    _break_balance(fake)
+    broker = _broker(tmp_path, fake)
+    with pytest.raises(KisError):
+        broker._pull_positions(None)
+    with pytest.raises(KisError):                                 # 한 번도 확인 못 했으면 유지할 값이 없다
+        broker.sync_positions(None)
+    with pytest.raises(KisError):
+        broker._set_initial_positions(None)
+
+
+def test_executor_sync_survives_position_read_failure(tmp_path):
+    from lumibot.strategies import Strategy
+
+    class _S(Strategy):
+        def on_trading_iteration(self):
+            pass
+
+    fake = _FakeKis()
+    fake.reply("/inquire-balance", _Res(BALANCE))
+    fake.reply("/inquire-daily-ccld", _Res({**OK, "output1": []}))
+    broker = _broker(tmp_path, fake)
+    strategy = _S(broker=broker, name="KeepPos")
+    real, calls = broker._balance, []
+
+    def balance_ok_then_limit():                                  # 현금 조회는 성공, 바로 뒤 보유 조회는 한도 초과
+        calls.append(1)
+        if len(calls) == 2:
+            raise KisError("EGW00215", "초당 거래건수 초과")
+        return real()
+
+    broker._balance = balance_ok_then_limit
+    strategy._executor.sync_broker()
+    assert len(calls) == 2
+    assert float(strategy.get_position("005930", broker_refresh=False).quantity) == 10.0
+
+
+def test_rate_limited_read_retries_more_but_order_only_once(tmp_path):
+    fake = _FakeKis()
+    fake.reply("/inquire-balance", _Res(LIMIT), _Res(LIMIT), _Res(LIMIT), _Res(OK))
+    _client(tmp_path, fake).request("GET", "/uapi/domestic-stock/v1/trading/inquire-balance", "TTTC8434R")
+    assert len(fake.calls) == 4                                   # 조회는 최대 3번 더
+    order = _FakeKis()
+    order.reply("/order-cash", _Res(LIMIT))
+    with pytest.raises(KisError):
+        _client(tmp_path, order).request("POST", "/uapi/domestic-stock/v1/trading/order-cash", "TTTC0012U", {})
+    assert len(order.calls) == 2                                  # 주문은 예전처럼 1번만 다시

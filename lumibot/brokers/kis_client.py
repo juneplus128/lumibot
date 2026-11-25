@@ -36,6 +36,8 @@ TOKEN_PATH = "/oauth2/tokenP"
 TOKEN_EXPIRED_CODES = {"EGW00123", "EGW00121"}
 # EGW00215: 모의투자에서 실제로 받은 "원장 초당 거래건수 초과" (2026-11-16 모의 주문 테스트)
 RATE_LIMIT_CODES = {"EGW00201", "EGW00215"}
+# [호출 한도 재시도] 조회(GET)는 3번까지, 주문(POST)은 1번만 (2026-11-25 모의: 잔고 조회가 1번 재시도로도 실패)
+RATE_LIMIT_RETRIES = {"GET": 3, "POST": 1}
 
 
 # KIS 가 실패를 돌려줬을 때 쓰는 에러. 코드와 KIS 의 한국어 메시지를 그대로 담는다 (키·토큰은 담지 않는다).
@@ -220,8 +222,8 @@ class KisClient:
             self._last_call = now
 
     def request(self, method: str, path: str, tr_id: str, params: dict | None = None, *,
-                tr_cont: str = "", _retried: bool = False) -> KisResponse:
-        """KIS 에 요청 1번. 실패하면 KisError. 토큰 만료·호출 한도 초과는 한 번 다시 시도한다."""
+                tr_cont: str = "", _retried: bool = False, _limit_tries: int = 0) -> KisResponse:
+        """KIS 에 요청 1번. 실패하면 KisError. 토큰 만료는 1번, 호출 한도 초과는 RATE_LIMIT_RETRIES 만큼 다시 시도한다."""
         method = method.upper()
         real_tr = tr_id
         headers = {
@@ -254,10 +256,12 @@ class KisClient:
         if not _retried and (res.status_code in (401, 403) or code in TOKEN_EXPIRED_CODES):
             self._token = None
             self.token(force=True)
-            return self.request(method, path, real_tr, params, tr_cont=tr_cont, _retried=True)
-        if not _retried and code in RATE_LIMIT_CODES:
+            return self.request(method, path, real_tr, params, tr_cont=tr_cont, _retried=True,
+                                _limit_tries=_limit_tries)
+        if code in RATE_LIMIT_CODES and _limit_tries < RATE_LIMIT_RETRIES.get(method, 1):
             self._sleep(1.0)
-            return self.request(method, path, real_tr, params, tr_cont=tr_cont, _retried=True)
+            return self.request(method, path, real_tr, params, tr_cont=tr_cont, _retried=_retried,
+                                _limit_tries=_limit_tries + 1)
 
         if res.status_code != 200 or str(body.get("rt_cd", "")) != "0":
             raise KisError(code or str(res.status_code), body.get("msg1") or body.get("error_description"),
